@@ -2,10 +2,8 @@
 Command line mock draft tool for BKFFL fantasy football league.
 
 ## Usage
-* If you can run python, just run "mock_draft.py" directly.
-* Otherwise, if you're on Windows, run the much slow executable "mock_draft.exe" (it takes a few minutes to start-up).
-* If you can't run python and are also on Mac, you're on your own.
-* Instructions are provided in the prompt.
+* Run the "mock_draft.py" python file with no arguments. Instructions are provided in the script.
+* If you don't know how to run a python file, ask chatgpt.
 
 ## Description
 * Loads current keepers, historical draft data, tendencies tuned to our league, etc.
