@@ -101,7 +101,7 @@ def create_random_rankings(fp_rankings, bump_rookies = True):
         new_rank.loc[(new_rank['Player'].isin(rookie_list)) & (new_rank.index >= 30),'down_fac']*=1.5
         new_rank.loc[new_rank['Player'].isin(rookie_list), 'up_fac']*=0
     # Tweek TEs
-    new_rank.loc[(new_rank['Position']=='TE') & (new_rank['Player']!= 'Travis Kelce'),'down_fac']*=0.5
+    new_rank.loc[(new_rank['Position']=='TE') & (new_rank['Player']!= 'Travis Kelce'),'down_fac']*=1
     new_rank.loc[(new_rank['Position']=='TE') & (new_rank['Player']!= 'Travis Kelce'),'up_fac']*=2
 
     new_rank.loc[new_rank['gauss'] < 0,'gauss']*= new_rank.loc[new_rank['gauss'] < 0,'down_fac']
@@ -331,76 +331,94 @@ class MockDraft:
         stats.loc['TOTAL'] = ['',stats['FPPG'].apply(convert_string_to_zero).sum()]
         return stats.loc['TOTAL','FPPG'],final_roster, stats
 
-    def evaluate_starting_lineup(self,row, user,roster_in,new_row = True, projections = None):
-        roster_init = roster_in.copy()
-        if new_row:
-            roster_init = pd.concat([roster_init, pd.DataFrame([row])[['Position','Player','ID']]],ignore_index = True)
-        else:
-            roster_init = roster_init[['Position','Player','ID']]
+    def evaluate_starting_lineup(self, roster, projections = None):
         if projections is None:
             projections = self.projections[[('','ID'),('','FPPG')]]
             projections.columns = projections.columns.droplevel(level = 0)
-        roster = pd.merge(roster_init,projections, on = 'ID',how = 'left').sort_values(by = 'FPPG',ascending = False)
-
-        def get_first_element_or_empty_string(df, element,col):
-            if len(df) > element:  # Check if the DataFrame is not empty
-                return df[col].iloc[element]
-            else:
-                return ''
+        qb_ids = roster.loc[roster['Position'] == 'QB', 'ID']
+        rb_ids = roster.loc[roster['Position'] == 'RB', 'ID']
+        wr_ids = roster.loc[roster['Position'] == 'WR', 'ID']
+        te_ids = roster.loc[roster['Position'] == 'TE', 'ID']
         position_ids = {
-            'QB1':get_first_element_or_empty_string(roster.loc[roster['Position']=='QB'], 0, 'ID'),
-            'RB1':get_first_element_or_empty_string(roster.loc[roster['Position']=='RB'], 0, 'ID'),
-            'RB2':get_first_element_or_empty_string(roster.loc[roster['Position']=='RB'], 1, 'ID'),
-            'WR1':get_first_element_or_empty_string(roster.loc[roster['Position']=='WR'], 0, 'ID'),
-            'WR2':get_first_element_or_empty_string(roster.loc[roster['Position']=='WR'], 1, 'ID'),
-            'TE1':get_first_element_or_empty_string(roster.loc[roster['Position']=='TE'], 0, 'ID')
+            'QB1': qb_ids.iloc[0] if not qb_ids.empty else self.replacement_ids['QB1'],
+            'RB1': rb_ids.iloc[0] if not rb_ids.empty else self.replacement_ids['RB1'],
+            'RB2': rb_ids.iloc[1] if len(rb_ids) > 1 else self.replacement_ids['RB2'],
+            'WR1': wr_ids.iloc[0] if not wr_ids.empty else self.replacement_ids['WR1'],
+            'WR2': wr_ids.iloc[1] if len(wr_ids) > 1 else self.replacement_ids['WR2'],
+            'TE1': te_ids.iloc[0] if not te_ids.empty else self.replacement_ids['TE1']
         }
-        for position, id in position_ids.items():
-            if id == '':
-                position_ids[position] = self.replacement_ids[position]
+        # Filter and get player IDs for Flex1 and Flex2
         leftovers_flex = roster.loc[(~roster['ID'].isin(position_ids.values())) & (roster['Position'] != 'QB')]
-        position_ids['Flex1'] = get_first_element_or_empty_string(leftovers_flex,0,'ID')
-        position_ids['Flex2'] = get_first_element_or_empty_string(leftovers_flex,0,'ID')
-        if position_ids['Flex1']=='':
-            position_ids['Flex1'] = self.replacement_ids['Flex1']
-        if position_ids['Flex2']=='':
-            position_ids['Flex2'] = self.replacement_ids['Flex2']
-        leftovers = roster.loc[~roster['ID'].isin(position_ids.values())]
-        position_ids['OP'] = get_first_element_or_empty_string(leftovers,0,'ID')
-        if position_ids['OP']=='':
-            position_ids['OP'] = self.replacement_ids['OP']
-        proj_pts = projections.loc[projections['ID'].isin(position_ids.values()),'FPPG'].sum()
+        position_ids['Flex1'] = leftovers_flex.iloc[0]['ID'] if not leftovers_flex.empty else self.replacement_ids[
+            'Flex1']
+        position_ids['Flex2'] = leftovers_flex.iloc[0]['ID'] if len(leftovers_flex) > 0 else self.replacement_ids[
+            'Flex2']
 
+        # Filter and get player ID for OP position
+        leftovers = roster.loc[~roster['ID'].isin(position_ids.values())]
+        position_ids['OP'] = leftovers.iloc[0]['ID'] if not leftovers.empty else self.replacement_ids['OP']
+
+        proj_pts = projections.loc[projections['ID'].isin(position_ids.values()), 'FPPG'].sum()
         return proj_pts
 
-    def compute_VAR_odds(self,user,db, player_rankings):
-        roster_init = db.loc[(db['Owner']==user) & (db['Player'] != '')].reset_index()
-        candidates = player_rankings.copy().reset_index()
-        candidates = candidates.loc[candidates.groupby('Position').idxmin()['Rank']].sort_values(by = 'Rank')
-        cur_points = self.evaluate_starting_lineup([],user,roster_init,new_row = False)
-        candidates['Forecast'] = candidates.apply(self.evaluate_starting_lineup, args = (user,roster_init),axis = 1)
-        candidates['Forecast'] = candidates['Forecast'].apply(lambda x:max(x,cur_points))
+    def compute_VAR_odds(self, roster, player_rankings, round):
+        candidates = player_rankings.reset_index()
 
-        candidates['prob'] =  (candidates['Forecast'] - (candidates['Forecast'].max()-6)).apply(lambda x:max(x,0))
-        candidates['prob']/=candidates['prob'].sum()
+        # Get the index of the minimum rank for each position
+        min_rank_indices = candidates.groupby('Position')['Rank'].idxmin()
+        candidates = candidates.loc[min_rank_indices].sort_values(by='Rank')
 
-        if candidates['Forecast'].max()-candidates['Forecast'].min() < 0.2:
+        # Calculate the current points and the forecast for each candidate
+        cur_points = self.evaluate_starting_lineup(roster)
+        def calculate_forecast(row, roster,cur_points):
+            roster_new = roster.copy()
+            roster_new = pd.concat([roster_new, pd.DataFrame([row])[['Position', 'Player', 'ID']]], ignore_index=True)
+            forecast = self.evaluate_starting_lineup(roster_new)
+            return max(forecast, cur_points)
 
+        candidates['Forecast'] = candidates.apply(lambda row: calculate_forecast(row, roster, cur_points), axis=1)
+
+        candidates['prob'] = np.where(candidates['Forecast'] - (candidates['Forecast'].max() - 6) > 0,
+                                      candidates['Forecast'] - (candidates['Forecast'].max() - 6),
+                                      0)
+        candidates['prob'] /= candidates['prob'].sum()
+
+        if candidates['Forecast'].max() - candidates['Forecast'].min() < 0.2:
             # Use additional logic
-            num_players = roster_init.groupby(by = 'Position').count()[['Pick']].reindex(index = ['QB','RB','WR','TE']).fillna(0)
-            num_players['ideal'] = [3,6,6,2]
-            num_players['impetus'] = ((num_players['ideal']-num_players['Pick']) /num_players['ideal']).apply(lambda x: max(0,x))
-            num_players['prob']= num_players['impetus']/num_players['impetus'].sum()
-            try:
-                qb_proj = self.projections.set_index(('','ID')).loc[candidates.set_index('Position').loc['QB','ID'],('','FPPG')]
-            except:
-                qb_proj = 0
-            if qb_proj < 5:
-                num_players.loc['QB','prob']*=1/4
-                num_players['prob'] /= num_players['prob'].sum()
-            return num_players[['prob']]
-        return candidates.set_index('Position')[['prob']]
+            num_players = roster.groupby('Position').size().reindex(index=['QB', 'RB', 'WR', 'TE']).fillna(0)
+            num_players_ideal = pd.Series([3, 6, 6, 2], index=['QB', 'RB', 'WR', 'TE'])
+            num_players_impetus = ((num_players_ideal - num_players) / num_players_ideal).clip(lower=0)
+            num_players_prob = num_players_impetus / num_players_impetus.sum()
 
+            try:
+                qb_proj = self.projections.loc[
+                    candidates.loc[candidates['Position'] == 'QB', ('', 'ID')], ('', 'FPPG')].values
+            except KeyError:
+                qb_proj = np.array([0])
+            if qb_proj < 5:
+                num_players_prob['QB'] *= 1 / 4
+                num_players_prob /= num_players_prob.sum()
+
+            return num_players_prob.to_frame(name='prob')
+        elif round >= 7:
+            num_players = roster.groupby('Position').size().reindex(index=['QB', 'RB', 'WR', 'TE']).fillna(0)
+            num_players_ideal = pd.Series([1, 2, 2,0], index=['QB', 'RB', 'WR', 'TE'])
+            num_players_impetus = ((num_players_ideal - num_players) / num_players_ideal).clip(lower=0)
+            num_players_prob = num_players_impetus / num_players_impetus.sum()
+            return num_players_prob.to_frame(name='prob')
+        elif round >= 11:
+            num_players = roster.groupby('Position').size().reindex(index=['QB', 'RB', 'WR', 'TE']).fillna(0)
+            num_players_ideal = pd.Series([2, 2, 2,0], index=['QB', 'RB', 'WR', 'TE'])
+            num_players_impetus = ((num_players_ideal - num_players) / num_players_ideal).clip(lower=0)
+            num_players_prob = num_players_impetus / num_players_impetus.sum()
+            return num_players_prob.to_frame(name='prob')
+        elif round >= 14:
+            num_players = roster.groupby('Position').size().reindex(index=['QB', 'RB', 'WR', 'TE']).fillna(0)
+            num_players_ideal = pd.Series([2, 3, 3,1], index=['QB', 'RB', 'WR', 'TE'])
+            num_players_impetus = ((num_players_ideal - num_players) / num_players_ideal).clip(lower=0)
+            num_players_prob = num_players_impetus / num_players_impetus.sum()
+            return num_players_prob.to_frame(name='prob')
+        return candidates.set_index('Position')['prob'].to_frame()
 
         # QB_id = player_rankings.loc[]
 
@@ -442,10 +460,12 @@ class MockDraft:
         prev3_pick = 'None'
         user_name_to_use = user_name
         if simulate:
+            start_time = time.time()
             user_name_to_use = ''
         index = 1
+        prob_log = pd.DataFrame()
         while index <= db.index.max():
-            user_name_to_use, index = self.progress_round(db, index, user_name_to_use)
+            user_name_to_use, index = self.progress_round(db, index, user_name_to_use, prob_log)
             if str(index).lower() in ['q','quit']:
                 return
             index += 1
@@ -467,6 +487,9 @@ class MockDraft:
             roster = roster[['Player']].rename(columns = {'Player':user})
             proj_roster = pd.concat([proj_roster,roster],axis = 1 )
 
+        if simulate:
+            print("\nSimulation time:\t{} seconds.".format(time.time()-start_time))
+
         proj_roster = proj_roster.reindex(columns = [owner for owner in self.pick_order if owner in proj_roster.columns])
         print("\nLeague starting lineups.\n{}".format(proj_roster))
         proj_standings = pd.DataFrame.from_dict(proj_points,orient = 'Index').rename(columns = {0:'Project FPPG'})\
@@ -482,6 +505,7 @@ class MockDraft:
             print("Mock draft results written to {}.\n".format(file_path))
         else:
             print("Mock draft results discarded.\n")
+        self.prob_log = prob_log
         return db, full_roster_dict
 
     def write_results_to_excel(self,db,final_roster, proj_roster, proj_standings):
@@ -529,76 +553,51 @@ class MockDraft:
         df.columns = pd.MultiIndex.from_tuples(df.columns)
         return df
 
-
-
-
     def pick_cpu_player(self, player_rankings, user, db, pick, round):
         player_rankings = player_rankings.loc[~player_rankings['ID'].isin(db['ID'].unique())].sort_index()
-        probs = pd.DataFrame(index = ['QB','RB','WR','TE'])
+        roster = db.loc[(db['Owner'] == user) & (db['Player'] != '')]
 
         # Step 1. Get historic probabilities for this pick and +- 2 picks.
         historic_pick_probs = self.historic_pick_probs.loc[pick]
 
         # Step 2. Get historic probabilities for the user
-        historic_personal_probs = league_history.get_personal_pick_probability_by_round(self.historic_data, user, round, weight_length=3)
+        historic_personal_probs = league_history.get_personal_pick_probability_by_round(self.historic_data, user, round, weight_length=5)
 
         # Step 3. Get probabilities by observing gaps in your rankings.
-        df = player_rankings.copy().reset_index()
-        df = df.loc[df.groupby('Position').idxmin()['Rank']].sort_values(by = 'Rank')
-        def piece_function(x):
-            if x < -30:
-                return 0
-            else:
-                return (x+30)**2
-            # else:
-            #     return x
-        df['wgt'] = df['Rank'].apply(lambda val: piece_function(pick-val))
+        df = player_rankings.reset_index()
+        min_rank_indices = df.groupby('Position')['Rank'].idxmin()
+        df = df.loc[min_rank_indices].sort_values(by='Rank')
+        df['wgt'] = np.clip(np.exp((pick - df['Rank']-5)/5), 0, 1)
         df['wgt'] /= df['wgt'].sum()
-        prob_gap = df[['Position','wgt']].set_index('Position').rename(columns = {'wgt':'rank'})
+        prob_gap = df[['Position', 'wgt']].set_index('Position').rename(columns={'wgt': 'rank'})
         prob_gap['historic_all'] = historic_pick_probs
-        prob_gap['historic_yours']=historic_personal_probs
-        prob_gap  = prob_gap.reindex(index = ['QB','RB','WR','TE'])
+        prob_gap['historic_yours'] = historic_personal_probs
+        prob_gap = prob_gap.reindex(index=['QB', 'RB', 'WR', 'TE'])
 
         # Step 4. Team need.
-        # need_weights = pd.DataFrame( {
-        #     0:[100, 100, 100, 90],
-        #     1:[90, 90, 90, 20],
-        #     2:[ 60, 80, 80, 0],
-        #     3: [15, 60, 60, 0],
-        #     4: [0, 45, 45, 0],
-        #     5: [0, 25, 25, 0],
-        #     6: [0, 10, 10, 0],
-        #     7: [0, 5, 5,0]
-        # } , index = ['QB','RB','WR','TE'])
-        # roster = db.loc[(db['Owner']==user) & (db['Position'] != '')]
-        # roster_marks = roster[['Position','ID']].groupby(by = 'Position').count()
-        # roster_marks = roster_marks.reindex(index = need_weights.index).fillna(0).astype(int)
-        # def get_values(row):
-        #     return need_weights.loc[row['index'],row['ID']]**2
-        # need_probs = pd.DataFrame( data = roster_marks.reset_index().apply(get_values, axis = 1)).rename(columns = {0:'need'})
-        # need_probs.index = ['QB','RB','WR','TE']
-        # need_probs /= need_probs.sum()
-        # prob_gap['need'] = need_probs
-        prob_gap['need'] = self.compute_VAR_odds(user,db,player_rankings)
-        # print("Pick {},User {}\n{}".format(pick, user,prob_gap['need']))
-        # if user == 'Paskal':
-        #     print("Pick {}\n{}".format(pick,prob_gap['need']))
-        personal_weights = pd.Series({'rank':.8,'historic_all':0,'historic_yours':0, 'need':.2})
-        def get_vector(pick):
-            vec1 = pd.DataFrame({'s1':[.6,.3,.1,0],
-                                 's2':[.8,.2,0,0],
-                                 's3':[.3,0,0,.7],
-                                 's4':[0,0,0,1]})
-            if pick <= 24:
-                vec = (24-pick)/24 * vec1['s1'] + pick/24*vec1['s2']
-            elif pick <= 84:
-                vec = (84-pick)/84 * vec1['s2'] + pick/84*vec1['s3']
-            elif pick <= 156:
-                vec = (156-pick)/156*vec1['s3'] + pick/156*vec1['s4']
-            else:
-                vec = vec1['s4']
-            return vec
-        personal_weights = pd.Series(dict(zip(['rank','historic_all','historic_yours','need'],get_vector(pick))))
+        prob_gap['need'] = self.compute_VAR_odds(roster,player_rankings, round)
+
+        # get full probs for writing to log
+        prob_row_cols = pd.MultiIndex.from_product([prob_gap.columns,prob_gap.index],names = ['Prob Type','Row'])
+        prob_row = pd.DataFrame(prob_gap.T.values.reshape(1,-1),columns = prob_row_cols)
+        prob_row.insert(0,'User',user)
+        prob_row.insert(0,'Pick',pick)
+
+        # amplify probs by interpolated weights
+        personal_weights = pd.DataFrame(
+            np.array([[0.3, 0.6, 0.1, 0], [0.8, 0.2, 0, 0], [0.3, 0, 0, 0.7], [0, 0, 0, 1],[0, 0, 0, 1]]),
+            columns=['rank', 'historic_all', 'historic_yours', 'need'],
+            index=[0, 24, 84, 156, 204])
+        def interpolate_between_rows(df, x):
+            x = max(min(x, df.index.max()), df.index.min())
+            lower_row = df.loc[df.index <= x].iloc[-1]
+            upper_row = df.loc[df.index >= x].iloc[0]
+            interpolation_factor = (x - lower_row.name) / (upper_row.name - lower_row.name)
+            interpolated_vector = lower_row + interpolation_factor * (upper_row - lower_row)
+            if np.isnan(interpolation_factor):
+                return upper_row
+            return interpolated_vector
+        personal_weights = interpolate_between_rows(personal_weights, pick)
 
         prob_gap *= personal_weights
         probabilities = prob_gap.sum(axis= 1)
@@ -615,7 +614,7 @@ class MockDraft:
             probabilities['TE'] *= (3 / 5) * (te_end_deweight - pick) / te_end_deweight + 1 * (pick / te_end_deweight)
         probabilities /= probabilities.sum()
 
-        sim = random.choices(range(len(probs)),probabilities)[0]
+        sim = random.choices(range(len(probabilities)),probabilities)[0]
         position = probabilities.index[sim]
         dfnew = player_rankings.reset_index()
         try:
@@ -626,12 +625,16 @@ class MockDraft:
             else:
                 position = 'RB'
             player_id = dfnew.loc[dfnew['Position'] == position].iloc[0]['ID']
-        # print(prob_gap)
-        # print(probabilities)
-        return position, player_id
 
 
-    def progress_round(self, db, index, user_name):
+
+        # if pick > 0:
+        #     print(probabilities)
+
+        return position, player_id, prob_row
+
+
+    def progress_round(self, db, index, user_name, prob_log):
         user_name_new = user_name
         index_new = index
         if db.loc[index, 'Pick Type'] == 'KEEP':
@@ -693,14 +696,16 @@ class MockDraft:
             if picker != user_name_new:
 
                 player_rankings = self.player_dict[picker]['ranks'].copy()
-                position, entry = self.pick_cpu_player(player_rankings, picker, db, index, db.loc[index, 'Round'])
+                position, entry, prob_row = self.pick_cpu_player(player_rankings, picker, db, index, db.loc[index, 'Round'])
                 # player_pos_rankings = self.player_dict[picker]['pos_ranks'][position].copy()
                 player_short = self.id_mapping[entry]
+                prob_log = pd.concat([prob_log, prob_row])
             db.loc[index, ['Position', 'Player', 'ID']] = [position, player_short, entry]
             print("Round {}, Slot {} (Pick {}):\t{} {}".format(str(db.loc[index, 'Round']).rjust(2),
                                                                str(db.loc[index, 'Slot']).rjust(2),
                                                                str(index).rjust(3), position.rjust(2),
                                                                player_short.rjust(19)))
+
             return user_name_new, index_new
 
 def main_menu():

@@ -69,7 +69,7 @@ def get_personal_pick_probability_by_round(data,user,round,weight_length = 3):
     slice_agg['perc'] = slice_agg['rank'] * slice_agg['wgt']
     answer = slice_agg[['position', 'perc']].groupby(by='position').sum()
     answer = answer.reindex(index=['QB', 'RB', 'WR', 'TE']).fillna(0)
-    return answer
+    return answer/answer.sum()
 
 def parse_historic_data():
     draft_excel_file = "BKFFL Draft History.xlsx"
