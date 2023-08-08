@@ -3,7 +3,7 @@ import pandas as pd
 import openpyxl
 from openpyxl.utils.dataframe import dataframe_to_rows
 import random
-import league_history
+import league_history, download_data
 import time
 import os, sys
 import ast
@@ -45,7 +45,12 @@ def construct_fp_rankings():
         return player_id
 
     random.seed(42)
-    fp_rankings = pd.read_csv(os.path.join(INPUT_FILE_PATH,'input','FantasyPros_2023_Draft_OP_Rankings.csv'))
+    try:
+        fp_rankings = download_data.get_fantasy_pros_rankings_data()
+        print("Download successful.")
+    except:
+        fp_rankings = pd.read_csv(os.path.join(INPUT_FILE_PATH,'input','FantasyPros_2023_Draft_OP_Rankings.csv'))
+        print("Rankings download failed. Loading default (hard-saved) rankings.")
     position_sequence = {'QB': 1, 'RB': 2, 'WR': 3, 'TE': 4}
     fp_rankings = fp_rankings.loc[fp_rankings['POS'].str[:2].isin(position_sequence.keys())]
     fp_rankings = fp_rankings.drop(columns=['TIERS', 'BEST', 'WORST']).rename(
@@ -174,8 +179,7 @@ class MockDraft:
         self.historic_data = league_history.parse_historic_data()
         self.historic_pick_probs = league_history.get_all_historical_pick_probabilities(self.historic_data,buffer = 2, weight_length = 3)
         self.fp_rankings = construct_fp_rankings()
-        self.projections_dict = self.load_projections()
-        self.projections = self.projections_dict['median']
+        self.projections_dict, self.projections = self.load_projections()
         self.initial_draft, keepers, pick_dict = load_current_setup(    file_name = os.path.join(INPUT_FILE_PATH,'input',"BKFFL Draft History.xlsx"), rankings = self.fp_rankings)
         self.pick_order = pick_dict.keys()
         _, self.keepers = remove_keepers(self.fp_rankings,keepers)
@@ -194,6 +198,22 @@ class MockDraft:
         self.id_mapping = short_rankings[['ID','Player (short)']].set_index('ID')['Player (short)'].to_dict()
         self.id_pos_mapping = short_rankings[['ID','Position']].set_index('ID')['Position'].to_dict()
         self.replacement_ids = self.load_replacement_ids()
+
+        adp_half = download_data.get_fantasy_pros_adp_data(use_ppr = False)
+        adp_full = download_data.get_fantasy_pros_adp_data(use_ppr = True)
+        adp = pd.merge(adp_half[['PLAYER','POS','YAHOO','SLEEPER','RTSPORTS']],adp_full[['PLAYER','POS','ESPN','NFL']], on = ['PLAYER','POS'])
+
+        def average_non_empty(row):
+            non_empty_values = pd.to_numeric(row, errors='coerce').dropna()
+            if not non_empty_values.empty:
+                return non_empty_values.mean()
+            else:
+                return None
+        adp['AVG'] = adp[['YAHOO','SLEEPER','RTSPORTS','ESPN','NFL']].apply(average_non_empty, axis=1)
+        adp = adp.sort_values(by = 'AVG').drop(columns = 'AVG').reset_index(drop = True)
+        adp.index +=1
+        adp['PLAYER'] = adp['PLAYER'].str.split(' ', 5).str[:-2].str.join(' ')
+
 
     def get_id(self,player_name):
         try:
@@ -225,6 +245,32 @@ class MockDraft:
             b = 1 - 11 * 160 / 3840
             return max(0, a * (yards/3) ** 2 + b)
 
+        # Parse Mike Clay projections
+        file_name_espn = 'ESPN_projections_20230806.csv'
+        df = pd.read_csv(os.path.join(INPUT_FILE_PATH,'input',file_name_espn))
+        col_rename =  {'Pass Yds': ('Pass', 'YDS'), 'Pass TD': ('Pass', 'TDS'), 'Pass INT': ('Pass', 'INTS'),
+             'Rush YDS': ('Rush', 'YDS'), 'Rush TD': ('Rush', 'TDS'), 'REC': ('Rec', 'REC'), 'REC YDS': ('Rec', 'YDS'),
+             'REC TDS': ('Rec', 'TDS'),'Rank':('','Rank'),'Player':('','Player'),'GAMES':('','GAMES')}
+        df = df.rename(columns = col_rename)
+        df.columns = pd.MultiIndex.from_tuples(df.columns)
+        for col in df.columns:
+            try:
+                df[col] = df[col].str.replace('-','0').fillna(0).astype(float)
+            except:
+                pass
+        df.insert(5, ('Pass', '300 GMS'), df[('Pass', 'YDS')].apply(compute_300_yd_pass_games).round(1))
+        df.insert(8, ('Rush', '100 GMS'), df[('Rush', 'YDS')].apply(compute_100_yd_games).round(1))
+        df.insert(12, ('Rec', '100 GMS'), df[('Rec', 'YDS')].apply(compute_100_yd_games).round(1))
+        ffp = df[('Pass', 'YDS')] / 25 + df[('Pass', 'TDS')] * 4 + df[('Pass', 'INTS')] * (-2) + df[
+            ('Pass', '300 GMS')] * 2 \
+              + df[('Rush', 'YDS')] / 10 + df[('Rush', 'TDS')] * 6 + df[
+                  ('Rush', '100 GMS')] * 2 \
+              + df[('Rec', 'REC')] * 0.5 + df[('Rec', 'YDS')] / 10 + df[('Rec', 'TDS')] * 6 + df[
+                  ('Rec', '100 GMS')] * 2
+        df.insert(2, ('', 'FFP'), ffp.round(1))
+        df.insert(3, ('', 'FPPG'), (ffp / df['']['GAMES'].apply(lambda x:max(x,1))).round(1))
+        df_clay = df.copy()
+
         file_name_qb = 'FantasyPros_Fantasy_Football_Projections_QB.csv'
         df_qb = pd.read_csv(os.path.join(INPUT_FILE_PATH,'input',file_name_qb)).dropna(subset = ['Team']).drop(columns = ['ATT','CMP','FPTS', 'ATT.1'])
         df_qb['Player'] = df_qb['Player'].fillna(method = 'ffill')
@@ -238,6 +284,8 @@ class MockDraft:
         df_qb.insert(9,('Rush','100 GMS'),df_qb[('Rush','YDS')].apply(compute_100_yd_games).round(1))
         df_qb.insert(2,('','POS'),'QB')
 
+
+        # Parse FantasyPros projections.
         file_name_flex = 'FantasyPros_Fantasy_Football_Projections_FLX.csv'
         df_flex = pd.read_csv(os.path.join(INPUT_FILE_PATH,'input',file_name_flex)).dropna(subset = ['Team'])
         # realign the columns
@@ -270,16 +318,20 @@ class MockDraft:
         df.insert(3,('','FFP'), ffp.round(1) )
         df.insert(4,('','FPPG'),(ffp/17).round(1))
 
+        # Get IDs with players
         rankings = self.fp_rankings[['Player','Position','ID']].rename(columns = {'Player':('','Player'),'Position':('','POS'),'ID':('','ID')})
         df = pd.merge(rankings,df,on = [('','Player'),('','POS')],how = 'right')
         df.columns = pd.MultiIndex.from_tuples(df.columns)
+
+        df_clay = pd.merge(rankings, df_clay, on=[('', 'Player')], how='right')
+        df_clay.columns = pd.MultiIndex.from_tuples(df_clay.columns)
 
         df_dict = {}
         for key in ['median','high','low']:
             df_cur = df.loc[df[('','Team')]==key].drop(columns = ('','Team')).sort_values(('','FFP'),ascending = False).reset_index(drop = True)
             df_cur.index = df_cur.index + 1
             df_dict[key] = df_cur
-        return df_dict
+        return df_dict, df_clay
 
     def get_roster(self,user,db, projections = None):
         roster_init = db.loc[(db['Owner']==user) & (db['Player'] != '')].reset_index()
