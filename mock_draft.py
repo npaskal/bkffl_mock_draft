@@ -66,6 +66,14 @@ def construct_fp_rankings():
     fp_rankings['ID'] = fp_rankings.apply(generate_player_id, axis=1)
     return fp_rankings
 
+def shuffle_players_locking_qbs(rankings_old, rankings_new):
+    rankings = rankings_old.reset_index(drop = True)
+    rankings.index +=1
+    rankings_new_qb = rankings_new.loc[rankings_new['Position']=='QB']
+    rankings.loc[rankings['Position']=='QB','ID'].iloc[:len(rankings_new_qb)]= rankings_new_qb['ID']
+    rankings = pd.merge(rankings_new, rankings.drop(columns = ['Player','Team']),on = 'ID',how = 'left')
+
+
 def convert_to_position(rankings_all):
     position_list = ['QB','RB','WR','TE']
     position_rank = {}
@@ -179,7 +187,7 @@ class MockDraft:
         self.historic_data = league_history.parse_historic_data()
         self.historic_pick_probs = league_history.get_all_historical_pick_probabilities(self.historic_data,buffer = 2, weight_length = 3)
         self.fp_rankings = construct_fp_rankings()
-        self.projections_dict, self.projections = self.load_projections()
+        self.projections = self.load_projections()
         self.initial_draft, keepers, pick_dict = load_current_setup(    file_name = os.path.join(INPUT_FILE_PATH,'input',"BKFFL Draft History.xlsx"), rankings = self.fp_rankings)
         self.pick_order = pick_dict.keys()
         _, self.keepers = remove_keepers(self.fp_rankings,keepers)
@@ -202,6 +210,8 @@ class MockDraft:
         adp_half = download_data.get_fantasy_pros_adp_data(use_ppr = False)
         adp_full = download_data.get_fantasy_pros_adp_data(use_ppr = True)
         adp = pd.merge(adp_half[['PLAYER','POS','YAHOO','SLEEPER','RTSPORTS']],adp_full[['PLAYER','POS','ESPN','NFL']], on = ['PLAYER','POS'])
+        adp['PLAYER'] = adp['PLAYER'].replace({'Dalvin Cook':'Dalvin Cook d ()','Kareem Hunt':'Kareem Hunt d ()','Leonard Fournette':'Leonard Fournette d ()',
+                                           'Ezekiel Elliott':'Ezekiel Elliott d ()','Jarvis Landry':'Jarvis Landry d ()'})
 
         def average_non_empty(row):
             non_empty_values = pd.to_numeric(row, errors='coerce').dropna()
@@ -213,6 +223,10 @@ class MockDraft:
         adp = adp.sort_values(by = 'AVG').drop(columns = 'AVG').reset_index(drop = True)
         adp.index +=1
         adp['PLAYER'] = adp['PLAYER'].str.split(' ', 5).str[:-2].str.join(' ')
+        rankings = self.fp_rankings[['Player','Position','ID']]
+        adp = pd.merge(rankings, adp.rename(columns = {'PLAYER':'Player','POS':'Position'}), on=['Player','Position'], how='right')
+
+
 
 
     def get_id(self,player_name):
@@ -270,68 +284,71 @@ class MockDraft:
         df.insert(2, ('', 'FFP'), ffp.round(1))
         df.insert(3, ('', 'FPPG'), (ffp / df['']['GAMES'].apply(lambda x:max(x,1))).round(1))
         df_clay = df.copy()
-
-        file_name_qb = 'FantasyPros_Fantasy_Football_Projections_QB.csv'
-        df_qb = pd.read_csv(os.path.join(INPUT_FILE_PATH,'input',file_name_qb)).dropna(subset = ['Team']).drop(columns = ['ATT','CMP','FPTS', 'ATT.1'])
-        df_qb['Player'] = df_qb['Player'].fillna(method = 'ffill')
-        df_qb.loc[~df_qb['Team'].isin(['high','low']),'Team'] = 'median'
-        df_qb = df_qb.rename(columns = {'Player':('','Player'),'Team':('','Team'),'YDS':('Pass','YDS'),'TDS':('Pass','TDS'),
-                                        'INTS':('Pass','INTS'),'YDS.1':('Rush','YDS'),'TDS.1':('Rush','TDS'),'FL':('Rush','FL')})
-        df_qb[('Pass','YDS')] = df_qb[('Pass','YDS')].str.replace(',','').astype(float)
-        df_qb[('Rush','YDS')] = df_qb[('Rush','YDS')].str.replace(',','').astype(float)
-        df_qb.columns = pd.MultiIndex.from_tuples(df_qb.columns)
-        df_qb.insert(5,('Pass','300 GMS'),df_qb[('Pass','YDS')].apply(compute_300_yd_pass_games).round(1))
-        df_qb.insert(9,('Rush','100 GMS'),df_qb[('Rush','YDS')].apply(compute_100_yd_games).round(1))
-        df_qb.insert(2,('','POS'),'QB')
-
-
-        # Parse FantasyPros projections.
-        file_name_flex = 'FantasyPros_Fantasy_Football_Projections_FLX.csv'
-        df_flex = pd.read_csv(os.path.join(INPUT_FILE_PATH,'input',file_name_flex)).dropna(subset = ['Team'])
-        # realign the columns
-        df_flex_mis = df_flex.loc[df_flex['Player'].isna()]
-        df_flex_mis.iloc[:,3:]=df_flex_mis.iloc[:,2:-1]
-        df_flex_mis['POS'] = np.nan
-        df_flex.loc[df_flex['Player'].isna()] = df_flex_mis
-        # end realign
-        df_flex['Player'] = df_flex['Player'].fillna(method = 'ffill')
-        df_flex['POS'] = df_flex['POS'].fillna(method = 'ffill')
-        df_flex['POS'] = df_flex['POS'].str[:2]
-        df_flex = df_flex.loc[df_flex['POS'].isin(['QB','RB','WR','TE'])].reset_index(drop = True)
-        df_flex.loc[~df_flex['Team'].isin(['high','low']),'Team'] = 'median'
-        df_flex = df_flex.drop(columns = ['ATT','FPTS']).rename(columns = {'Player':('','Player'),'Team':('','Team'),'POS':('','POS'),
-                                                                           'YDS':('Rush','YDS'),'TDS':('Rush','TDS'),
-                                        'REC':('Rec','REC'),'YDS.1':('Rec','YDS'),'TDS.1':('Rec','TDS'),'FL':('Rush','FL')})
-
-        df_flex[('Rec','YDS')] = df_flex[('Rec','YDS')].str.replace(',','').astype(float)
-        df_flex[('Rush','YDS')] = df_flex[('Rush','YDS')].str.replace(',','').astype(float)
-        df_flex[('Rush','TDS')] = df_flex[('Rush','TDS')].astype(float)
-        df_flex[('Rec','TDS')] = df_flex[('Rec','TDS')].astype(float)
-        df_flex[('Rec','REC')] = df_flex[('Rec','REC')].astype(float)
-        df_flex.columns = pd.MultiIndex.from_tuples(df_flex.columns)
-        df_flex.insert(5,('Rush','100 GMS'),df_flex[('Rush','YDS')].apply(compute_100_yd_games).round(1))
-        df_flex.insert(9,('Rec','100 GMS'),df_flex[('Rec','YDS')].apply(compute_100_yd_games).round(1))
-        df = pd.merge(df_qb,df_flex,on = [('','Player'),('','Team'),('','POS'),('Rush','YDS'),('Rush','TDS'),('Rush','100 GMS'),('Rush','FL')], how = 'outer').fillna(0)
-        ffp = df[('Pass','YDS')]/25 + df[('Pass','TDS')]*4+df[('Pass','INTS')]*(-2) + df[('Pass','300 GMS')]*2\
-                + df[('Rush','YDS')]/10 + df[('Rush','TDS')]*6 + df[('Rush','FL')]*(-2) + df[('Rush','100 GMS')]*2\
-                + df[('Rec','REC')]*0.5+ df[('Rec','YDS')]/10 + df[('Rec','TDS')]*6 + df[('Rec','100 GMS')]*2
-        df.insert(3,('','FFP'), ffp.round(1) )
-        df.insert(4,('','FPPG'),(ffp/17).round(1))
-
-        # Get IDs with players
         rankings = self.fp_rankings[['Player','Position','ID']].rename(columns = {'Player':('','Player'),'Position':('','POS'),'ID':('','ID')})
-        df = pd.merge(rankings,df,on = [('','Player'),('','POS')],how = 'right')
-        df.columns = pd.MultiIndex.from_tuples(df.columns)
-
         df_clay = pd.merge(rankings, df_clay, on=[('', 'Player')], how='right')
         df_clay.columns = pd.MultiIndex.from_tuples(df_clay.columns)
 
-        df_dict = {}
-        for key in ['median','high','low']:
-            df_cur = df.loc[df[('','Team')]==key].drop(columns = ('','Team')).sort_values(('','FFP'),ascending = False).reset_index(drop = True)
-            df_cur.index = df_cur.index + 1
-            df_dict[key] = df_cur
-        return df_dict, df_clay
+
+        # file_name_qb = 'FantasyPros_Fantasy_Football_Projections_QB.csv'
+        # df_qb = pd.read_csv(os.path.join(INPUT_FILE_PATH,'input',file_name_qb)).dropna(subset = ['Team']).drop(columns = ['ATT','CMP','FPTS', 'ATT.1'])
+        # df_qb['Player'] = df_qb['Player'].fillna(method = 'ffill')
+        # df_qb.loc[~df_qb['Team'].isin(['high','low']),'Team'] = 'median'
+        # df_qb = df_qb.rename(columns = {'Player':('','Player'),'Team':('','Team'),'YDS':('Pass','YDS'),'TDS':('Pass','TDS'),
+        #                                 'INTS':('Pass','INTS'),'YDS.1':('Rush','YDS'),'TDS.1':('Rush','TDS'),'FL':('Rush','FL')})
+        # df_qb[('Pass','YDS')] = df_qb[('Pass','YDS')].str.replace(',','').astype(float)
+        # df_qb[('Rush','YDS')] = df_qb[('Rush','YDS')].str.replace(',','').astype(float)
+        # df_qb.columns = pd.MultiIndex.from_tuples(df_qb.columns)
+        # df_qb.insert(5,('Pass','300 GMS'),df_qb[('Pass','YDS')].apply(compute_300_yd_pass_games).round(1))
+        # df_qb.insert(9,('Rush','100 GMS'),df_qb[('Rush','YDS')].apply(compute_100_yd_games).round(1))
+        # df_qb.insert(2,('','POS'),'QB')
+
+
+        # # Parse FantasyPros projections.
+        # file_name_flex = 'FantasyPros_Fantasy_Football_Projections_FLX.csv'
+        # df_flex = pd.read_csv(os.path.join(INPUT_FILE_PATH,'input',file_name_flex)).dropna(subset = ['Team'])
+        # # realign the columns
+        # df_flex_mis = df_flex.loc[df_flex['Player'].isna()]
+        # df_flex_mis.iloc[:,3:]=df_flex_mis.iloc[:,2:-1]
+        # df_flex_mis['POS'] = np.nan
+        # df_flex.loc[df_flex['Player'].isna()] = df_flex_mis
+        # # end realign
+        # df_flex['Player'] = df_flex['Player'].fillna(method = 'ffill')
+        # df_flex['POS'] = df_flex['POS'].fillna(method = 'ffill')
+        # df_flex['POS'] = df_flex['POS'].str[:2]
+        # df_flex = df_flex.loc[df_flex['POS'].isin(['QB','RB','WR','TE'])].reset_index(drop = True)
+        # df_flex.loc[~df_flex['Team'].isin(['high','low']),'Team'] = 'median'
+        # df_flex = df_flex.drop(columns = ['ATT','FPTS']).rename(columns = {'Player':('','Player'),'Team':('','Team'),'POS':('','POS'),
+        #                                                                    'YDS':('Rush','YDS'),'TDS':('Rush','TDS'),
+        #                                 'REC':('Rec','REC'),'YDS.1':('Rec','YDS'),'TDS.1':('Rec','TDS'),'FL':('Rush','FL')})
+        #
+        # df_flex[('Rec','YDS')] = df_flex[('Rec','YDS')].str.replace(',','').astype(float)
+        # df_flex[('Rush','YDS')] = df_flex[('Rush','YDS')].str.replace(',','').astype(float)
+        # df_flex[('Rush','TDS')] = df_flex[('Rush','TDS')].astype(float)
+        # df_flex[('Rec','TDS')] = df_flex[('Rec','TDS')].astype(float)
+        # df_flex[('Rec','REC')] = df_flex[('Rec','REC')].astype(float)
+        # df_flex.columns = pd.MultiIndex.from_tuples(df_flex.columns)
+        # df_flex.insert(5,('Rush','100 GMS'),df_flex[('Rush','YDS')].apply(compute_100_yd_games).round(1))
+        # df_flex.insert(9,('Rec','100 GMS'),df_flex[('Rec','YDS')].apply(compute_100_yd_games).round(1))
+        # df = pd.merge(df_qb,df_flex,on = [('','Player'),('','Team'),('','POS'),('Rush','YDS'),('Rush','TDS'),('Rush','100 GMS'),('Rush','FL')], how = 'outer').fillna(0)
+        # ffp = df[('Pass','YDS')]/25 + df[('Pass','TDS')]*4+df[('Pass','INTS')]*(-2) + df[('Pass','300 GMS')]*2\
+        #         + df[('Rush','YDS')]/10 + df[('Rush','TDS')]*6 + df[('Rush','FL')]*(-2) + df[('Rush','100 GMS')]*2\
+        #         + df[('Rec','REC')]*0.5+ df[('Rec','YDS')]/10 + df[('Rec','TDS')]*6 + df[('Rec','100 GMS')]*2
+        # df.insert(3,('','FFP'), ffp.round(1) )
+        # df.insert(4,('','FPPG'),(ffp/17).round(1))
+        #
+        # # Get IDs with players
+        # rankings = self.fp_rankings[['Player','Position','ID']].rename(columns = {'Player':('','Player'),'Position':('','POS'),'ID':('','ID')})
+        # df = pd.merge(rankings,df,on = [('','Player'),('','POS')],how = 'right')
+        # df.columns = pd.MultiIndex.from_tuples(df.columns)
+
+        #
+        # df_dict = {}
+        # for key in ['median','high','low']:
+        #     df_cur = df.loc[df[('','Team')]==key].drop(columns = ('','Team')).sort_values(('','FFP'),ascending = False).reset_index(drop = True)
+        #     df_cur.index = df_cur.index + 1
+        #     df_dict[key] = df_cur
+        # return df_dict, df_clay
+        return df_clay
 
     def get_roster(self,user,db, projections = None):
         roster_init = db.loc[(db['Owner']==user) & (db['Player'] != '')].reset_index()
